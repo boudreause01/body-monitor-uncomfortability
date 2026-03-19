@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Biometric Feedback Terminal</title>
+    <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+    <style>
+        :root { --bg: #050505; --panel: #111; --accent: #00ff41; --alert: #ff0033; }
+        body { font-family: 'Courier New', monospace; background: var(--bg); color: var(--accent); margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        .terminal { width: 100%; max-width: 600px; background: var(--panel); border: 1px solid var(--accent); border-radius: 4px; padding: 20px; box-shadow: 0 0 20px rgba(0, 255, 65, 0.2); }
+        .video-container { position: relative; width: 100%; aspect-ratio: 4/3; background: #000; margin-bottom: 15px; border: 1px solid #333; }
+        video { width: 100%; height: 100%; transform: scaleX(-1); object-fit: cover; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; transform: scaleX(-1); }
+        .btn { width: 100%; padding: 12px; background: transparent; border: 1px solid var(--accent); color: var(--accent); cursor: pointer; font-family: inherit; font-weight: bold; margin-bottom: 10px; transition: 0.3s; }
+        .btn:hover { background: var(--accent); color: #000; }
+        #log { font-size: 11px; height: 120px; overflow-y: auto; background: #000; padding: 10px; border: 1px solid #222; margin-top: 10px; color: #888; }
+        .status-row { display: flex; justify-content: space-between; padding: 10px; border-bottom: 1px solid #222; font-size: 13px; }
+        .warning-active { color: var(--alert); border-color: var(--alert); animation: flicker 0.1s infinite; }
+        @keyframes flicker { 0% { opacity: 1; } 50% { opacity: 0.8; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body>
+
+<div class="terminal">
+    <div style="display:flex; justify-content: space-between;">
+        <span>SYS_STATUS: <span id="sys-status">OFFLINE</span></span>
+        <span id="timestamp"></span>
+    </div>
+
+    <div class="video-container">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="overlay"></canvas>
+    </div>
+
+    <button id="init-btn" class="btn">INITIALIZE BIOMETRIC SENSORS</button>
+    <button id="cal-btn" class="btn" style="display:none;">CALIBRATE NEURAL BASELINE</button>
+
+    <div class="status-row">
+        <span>POSTURE_DRIFT: <span id="drift-val">0px</span></span>
+        <span>STRESS_INDEX: <span id="stress-val">0.00</span></span>
+    </div>
+
+    <div id="log">
+        [SYSTEM READY] - Awaiting Hardware Handshake...
+    </div>
+</div>
+
+<script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('overlay');
+    const logBox = document.getElementById('log');
+    const initBtn = document.getElementById('init-btn');
+    const calBtn = document.getElementById('cal-btn');
+    
+    let baselineY = null;
+    let isMonitoring = false;
+
+    function sysLog(msg) {
+        const time = new Date().toLocaleTimeString();
+        logBox.innerHTML = `[${time}] ${msg}<br>` + logBox.innerHTML;
+    }
+
+    async function loadModels() {
+        sysLog("Loading Neural Network Weights...");
+        const URL = 'https://cdn.jsdelivr.net/gh/vladmandic/face-api/model/';
+        await faceapi.nets.tinyFaceDetector.loadFromUri(URL);
+        await faceapi.nets.faceExpressionNet.loadFromUri(URL);
+        sysLog("Models Loaded into Memory.");
+    }
+    loadModels();
+
+    initBtn.onclick = async () => {
+        sysLog("Requesting Camera Access...");
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            video.srcObject = stream;
+            video.onloadedmetadata = () => {
+                video.play();
+                initBtn.style.display = 'none';
+                calBtn.style.display = 'block';
+                document.getElementById('sys-status').innerText = "LIVE";
+                sysLog("Camera Stream Established.");
+            };
+        } catch (e) {
+            sysLog("ERROR: Access Denied. Check HP Privacy Switch.");
+        }
+    };
+
+    calBtn.onclick = () => {
+        baselineY = null;
+        isMonitoring = true;
+        sysLog("Targeting Neutral Baseline... Hold Position.");
+    };
+
+    video.addEventListener('play', () => {
+        const displaySize = { width: video.clientWidth, height: video.clientHeight };
+        faceapi.matchDimensions(canvas, displaySize);
+
+        setInterval(async () => {
+            if (!faceapi.nets.tinyFaceDetector.params || video.paused) return;
+
+            const detection = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions()).withFaceExpressions();
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (detection) {
+                // Draw Visual Grid
+                const resized = faceapi.resizeResults(detection, displaySize);
+                faceapi.draw.drawDetections(canvas, resized);
+
+                const box = detection.detection.box;
+                const e = detection.expressions;
+
+                if (isMonitoring && baselineY === null) {
+                    baselineY = box.y;
+                    sysLog("Baseline Established at Y:" + Math.round(box.y));
+                }
+
+                if (isMonitoring) {
+                    const drift = Math.round(box.y - baselineY);
+                    const stress = Math.max(e.angry, e.sad).toFixed(2);
+                    
+                    document.getElementById('drift-val').innerText = drift + "px";
+                    document.getElementById('stress-val').innerText = stress;
+
+                    if (drift > 45 || stress > 0.25) {
+                        document.querySelector('.terminal').classList.add('warning-active');
+                        if (drift > 45) sysLog("ALERT: Postural Collapse Detected.");
+                        if (stress > 0.25) sysLog("ALERT: Sensory Over-Stimulation Detected.");
+                    } else {
+                        document.querySelector('.terminal').classList.remove('warning-active');
+                    }
+                }
+            }
+        }, 500);
+    });
+
+    setInterval(() => {
+        document.getElementById('timestamp').innerText = new Date().toISOString();
+    }, 1000);
+</script>
+</body>
+</html>
